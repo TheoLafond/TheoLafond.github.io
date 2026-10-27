@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="fr">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="theme-color" content="#f6f7f5">
+	<title>Vent — Mont Blanc</title>
+	<style>
+		:root {
+			color-scheme: light;
+			--ink: #202622;
+			--muted: #78817b;
+			--line: #e4e8e4;
+			--paper: #f6f7f5;
+			--white: #fff;
+			--green: #376b52;
+			--soft-green: #eaf1ec;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			background: var(--paper);
+			color: var(--ink);
+			font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			-webkit-font-smoothing: antialiased;
+		}
+		main { width: min(940px, calc(100% - 40px)); margin: 0 auto; padding: 68px 0 42px; }
+		.eyebrow { color: var(--green); font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+		h1 { margin: 10px 0 5px; font-size: clamp(32px, 5vw, 46px); font-weight: 600; letter-spacing: -.055em; line-height: 1.08; }
+		.subtitle { margin: 0; color: var(--muted); font-size: 14px; }
+		.toolbar { display: flex; align-items: end; gap: 12px; margin: 34px 0 24px; }
+		.field { display: grid; gap: 7px; }
+		.field label { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+		input, button { height: 42px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+		input { min-width: 230px; padding: 0 12px; background: var(--white); color: var(--ink); }
+		button { padding: 0 16px; background: var(--ink); color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; transition: background .15s ease; }
+		button:hover { background: var(--green); }
+		button:disabled { cursor: wait; opacity: .65; }
+		.status { min-height: 22px; margin: -12px 0 12px; color: var(--muted); font-size: 12px; }
+		.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--white); }
+		table { width: 100%; min-width: 700px; border-collapse: collapse; text-align: left; }
+		th { padding: 13px 17px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
+		td { padding: 15px 17px; border-top: 1px solid var(--line); vertical-align: middle; }
+		th:nth-child(2), th:nth-child(3), td:nth-child(2), td:nth-child(3) { text-align: right; }
+		.model { font-size: 13px; font-weight: 650; }
+		.model-sub { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 400; }
+		.speed { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; letter-spacing: -.03em; white-space: nowrap; }
+		.unit { margin-left: 3px; color: var(--muted); font-size: 11px; font-weight: 450; letter-spacing: 0; }
+		.run, .next { color: #56615a; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+		.run small, .next small { display: block; color: #929a95; font-size: 10px; }
+		.empty { color: #9aa19c; font-size: 12px; }
+		.foot { display: flex; justify-content: space-between; gap: 20px; margin-top: 15px; color: var(--muted); font-size: 11px; }
+		.foot p { margin: 0; }
+		a { color: inherit; text-decoration-color: #b7c3bb; text-underline-offset: 3px; }
+		@media (max-width: 600px) {
+			main { width: min(100% - 28px, 940px); padding-top: 42px; }
+			.toolbar { align-items: stretch; flex-direction: column; }
+			input { width: 100%; }
+			button { align-self: flex-start; }
+			.foot { flex-direction: column; gap: 6px; }
+		}
+	</style>
+</head>
+<body>
+	<main>
+		<header>
+			<div class="eyebrow">Météo haute altitude · 4 808 m</div>
+			<h1>Vent au Mont Blanc</h1>
+			<p class="subtitle">Comparaison des vents prévus aux niveaux de pression et au sommet.</p>
+		</header>
+
+		<section class="toolbar" aria-label="Sélection de la date">
+			<div class="field">
+				<label for="valid-time">Date et heure · heure de Paris</label>
+				<input id="valid-time" type="datetime-local" step="3600">
+			</div>
+			<button id="refresh" type="button">Afficher le vent</button>
+		</section>
+		<p id="status" class="status" role="status" aria-live="polite">Choisissez une date, puis chargez les prévisions.</p>
+
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th scope="col">Modèle</th>
+						<th scope="col">600 hPa</th>
+						<th scope="col">500 hPa</th>
+						<th scope="col">4 808 m*</th>
+						<th scope="col">Run utilisé · UTC</th>
+						<th scope="col">Prochain run · Paris</th>
+					</tr>
+				</thead>
+				<tbody id="results"></tbody>
+			</table>
+		</div>
+		<div class="foot">
+			<p>* Estimation interpolée entre 600 et 500 hPa à partir des hauteurs géopotentielles et directions du vent.</p>
+			<p>Source : <a href="https://open-meteo.com/en/docs/single-runs-api" target="_blank" rel="noreferrer">Open-Meteo · runs individuels</a></p>
+		</div>
+	</main>
+
+	<script>
+		const models = [
+			{ name: "GFS", detail: "NOAA · global", id: "ncep_gfs_seamless", cycle: 6, delay: 5 },
+			{ name: "ECMWF IFS", detail: "ECMWF · 0,25°", id: "ecmwf_ifs025", cycle: 6, delay: 5 },
+			{ name: "ICON-EU", detail: "DWD · Europe", id: "dwd_icon_eu", cycle: 3, delay: 2 },
+			{ name: "ICON Global", detail: "DWD · global", id: "dwd_icon_global", cycle: 6, delay: 4 },
+			{ name: "ARPEGE World", detail: "Météo-France · global", id: "meteofrance_arpege_world", cycle: 6, delay: 4 },
+			{ name: "AROME France", detail: "Météo-France · régional", id: "meteofrance_arome_france", cycle: 3, delay: 2 }
+		];
+		const api = "https://single-runs-api.open-meteo.com/v1/forecast";
+		const paris = "Europe/Paris";
+		const results = document.querySelector("#results");
+		const status = document.querySelector("#status");
+		const timeInput = document.querySelector("#valid-time");
+		const refreshButton = document.querySelector("#refresh");
+
+		function parisInputValue(date) {
+			const parts = new Intl.DateTimeFormat("sv-SE", {
+				timeZone: paris, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23"
+			}).formatToParts(date).reduce((out, part) => (out[part.type] = part.value, out), {});
+			return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:00`;
+		}
+
+		function runCandidates(model, now = Date.now()) {
+			const cycleMs = model.cycle * 60 * 60 * 1000;
+			const latest = Math.floor((now - model.delay * 60 * 60 * 1000) / cycleMs) * cycleMs;
+			return Array.from({ length: 5 }, (_, i) => new Date(latest - i * cycleMs));
+		}
+
+		function displayDate(date, zone, options = {}) {
+			return new Intl.DateTimeFormat("fr-FR", {
+				timeZone: zone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", ...options
+			}).format(date);
+		}
+
+		function nextRun(model, now = Date.now()) {
+			const cycleMs = model.cycle * 60 * 60 * 1000;
+			return new Date((Math.floor(now / cycleMs) + 1) * cycleMs);
+		}
+
+		function rowHTML(model, state = "loading") {
+			const busy = state === "loading";
+			const empty = `<span class="empty">${busy ? "Chargement…" : "—"}</span>`;
+			return `<tr>
+				<td><span class="model">${model.name}</span><span class="model-sub">${model.detail}</span></td>
+				<td>${busy ? empty : state.error || state.values600}</td>
+				<td>${busy ? empty : state.error || state.values500}</td>
+				<td>${busy ? empty : state.error || state.values4808}</td>
+				<td class="run">${busy ? empty : state.run}</td>
+				<td class="next">${displayDate(nextRun(model), paris)}<small>initialisation prévue</small></td>
+			</tr>`;
+		}
+
+		function speed(value) {
+			if (value == null || !Number.isFinite(Number(value))) return `<span class="empty">indisponible</span>`;
+			return `<span class="speed">${Math.round(Number(value))}<span class="unit">km/h</span></span>`;
+		}
+
+		async function fetchRun(model, run, target) {
+			const params = new URLSearchParams({
+				latitude: "45.8326", longitude: "6.8652", elevation: "4808",
+				hourly: "wind_speed_600hPa,wind_speed_500hPa,wind_direction_600hPa,wind_direction_500hPa,geopotential_height_600hPa,geopotential_height_500hPa",
+				timezone: paris, wind_speed_unit: "kmh", models: model.id,
+				run: run.toISOString().slice(0, 16)
+			});
+			const response = await fetch(`${api}?${params}`);
+			const data = await response.json();
+			if (!response.ok || data.error) throw new Error(data.reason || `HTTP ${response.status}`);
+			const times = data.hourly?.time || [];
+			const index = times.indexOf(target);
+			if (index < 0) return { outsideHorizon: true };
+			const hourly = data.hourly;
+			const value600 = hourly.wind_speed_600hPa?.[index];
+			const value500 = hourly.wind_speed_500hPa?.[index];
+			if (value600 == null && value500 == null) throw new Error("Niveaux 600/500 hPa indisponibles pour ce modèle");
+			const height600 = hourly.geopotential_height_600hPa?.[index];
+			const height500 = hourly.geopotential_height_500hPa?.[index];
+			const direction600 = hourly.wind_direction_600hPa?.[index];
+			const direction500 = hourly.wind_direction_500hPa?.[index];
+			let value4808 = null;
+			if ([height600, height500, value600, value500, direction600, direction500].every(Number.isFinite)) {
+				const fraction = (4808 - height600) / (height500 - height600);
+				if (fraction >= 0 && fraction <= 1) {
+					const component = (speed, direction, axis) => {
+						const radians = direction * Math.PI / 180;
+						return -speed * (axis === "east" ? Math.sin(radians) : Math.cos(radians));
+					};
+					const east = component(value600, direction600, "east") * (1 - fraction) + component(value500, direction500, "east") * fraction;
+					const north = component(value600, direction600, "north") * (1 - fraction) + component(value500, direction500, "north") * fraction;
+					value4808 = Math.hypot(east, north);
+				}
+			}
+			return { value600, value500, value4808, run };
+		}
+
+		async function loadModel(model, target) {
+			let lastError;
+			for (const run of runCandidates(model)) {
+				try {
+					const result = await fetchRun(model, run, target);
+					if (result.outsideHorizon) return { error: "Date hors de l’échéance du modèle" };
+					if (result.value600 == null && result.value500 == null) return { error: "Niveaux 600/500 hPa indisponibles" };
+					return {
+						values600: speed(result.value600), values500: speed(result.value500), values4808: speed(result.value4808),
+						run: `${displayDate(result.run, "UTC")}<small>${displayDate(result.run, paris)} heure de Paris</small>`
+					};
+				} catch (error) {
+					lastError = error;
+				}
+			}
+			return { error: lastError?.message || "Run récent indisponible" };
+		}
+
+		async function refresh() {
+			if (!timeInput.value) {
+				status.textContent = "Sélectionnez une date et une heure.";
+				return;
+			}
+			const target = timeInput.value;
+			refreshButton.disabled = true;
+			status.textContent = "Récupération des derniers runs disponibles…";
+			results.innerHTML = models.map(model => rowHTML(model)).join("");
+			const tasks = models.map(async (model, index) => {
+				const result = await loadModel(model, target);
+				const row = results.rows[index];
+				if (result.error) {
+					row.innerHTML = rowHTML(model, { error: `<span class="empty">${result.error}</span>`, run: `<span class="empty">—</span>` }).replace(/^<tr>|<\/tr>$/g, "");
+				} else {
+					row.innerHTML = rowHTML(model, result).replace(/^<tr>|<\/tr>$/g, "");
+				}
+			});
+			await Promise.all(tasks);
+			const updated = new Intl.DateTimeFormat("fr-FR", { timeZone: paris, hour: "2-digit", minute: "2-digit" }).format(new Date());
+			const [date, hour] = target.split("T");
+			const [year, month, day] = date.split("-");
+			status.textContent = `Prévisions pour le ${day}/${month}/${year} à ${hour} · actualisé à ${updated}.`;
+			refreshButton.disabled = false;
+		}
+
+		timeInput.value = parisInputValue(new Date(Math.ceil((Date.now() + 1) / 3600000) * 3600000));
+		refreshButton.addEventListener("click", refresh);
+		timeInput.addEventListener("change", refresh);
+		refresh();
+	</script>
+</body>
+</html>
