@@ -29,6 +29,15 @@
 		h1 { margin: 10px 0 5px; font-size: clamp(32px, 5vw, 46px); font-weight: 600; letter-spacing: -.055em; line-height: 1.08; }
 		.subtitle { margin: 0; color: var(--muted); font-size: 14px; }
 		.toolbar { display: flex; align-items: end; gap: 12px; margin: 34px 0 24px; }
+		.daily { margin-top: 26px; }
+		.daily-label { margin-bottom: 9px; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+		.daily-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+		button.day-chip { display: grid; height: auto; min-height: 68px; padding: 9px 11px; border-color: var(--line); background: var(--white); color: var(--ink); text-align: left; }
+		button.day-chip:hover, button.day-chip[aria-pressed="true"] { border-color: var(--green); background: var(--soft-green); }
+		.day-name { color: var(--muted); font-size: 11px; font-weight: 550; }
+		.day-value { margin-top: 2px; font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+		.day-value small { margin-left: 3px; color: var(--muted); font-size: 10px; font-weight: 450; }
+		.day-count { color: var(--muted); font-size: 10px; }
 		.field { display: grid; gap: 7px; }
 		.field label { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
 		input, button { height: 42px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
@@ -54,6 +63,7 @@
 		a { color: inherit; text-decoration-color: #b7c3bb; text-underline-offset: 3px; }
 		@media (max-width: 600px) {
 			main { width: min(100% - 28px, 940px); padding-top: 42px; }
+			.daily-list { grid-template-columns: repeat(5, minmax(86px, 1fr)); overflow-x: auto; padding-bottom: 4px; }
 			.toolbar { align-items: stretch; flex-direction: column; }
 			input { width: 100%; }
 			button { align-self: flex-start; }
@@ -68,6 +78,11 @@
 			<h1>Vent au Mont Blanc</h1>
 			<p class="subtitle">Comparaison des vents prévus aux niveaux de pression et au sommet.</p>
 		</header>
+
+		<section class="daily" aria-label="Moyenne des prévisions à midi pour les cinq prochains jours">
+			<div class="daily-label">Moyenne à 4 808 m · 12 h · 5 prochains jours</div>
+			<div id="daily-list" class="daily-list"></div>
+		</section>
 
 		<section class="toolbar" aria-label="Sélection de la date">
 			<div class="field">
@@ -114,6 +129,9 @@
 		const status = document.querySelector("#status");
 		const timeInput = document.querySelector("#valid-time");
 		const refreshButton = document.querySelector("#refresh");
+		const dailyList = document.querySelector("#daily-list");
+		const forecastCache = new Map();
+		let dailyTargets = [];
 
 		function parisInputValue(date) {
 			const parts = new Intl.DateTimeFormat("sv-SE", {
@@ -126,6 +144,44 @@
 			const cycleMs = model.cycle * 60 * 60 * 1000;
 			const latest = Math.floor((now - model.delay * 60 * 60 * 1000) / cycleMs) * cycleMs;
 			return Array.from({ length: 5 }, (_, i) => new Date(latest - i * cycleMs));
+		}
+
+		function upcomingNoons(count = 5) {
+			const now = new Date();
+			const parts = new Intl.DateTimeFormat("en-CA", {
+				timeZone: paris, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23"
+			}).formatToParts(now).reduce((out, part) => (out[part.type] = part.value, out), {});
+			const startOffset = Number(parts.hour) < 12 ? 0 : 1;
+			return Array.from({ length: count }, (_, index) => {
+				const date = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + startOffset + index));
+				return `${date.toISOString().slice(0, 10)}T12:00`;
+			});
+		}
+
+		function dayLabel(target) {
+			const [date] = target.split("T");
+			return new Intl.DateTimeFormat("fr-FR", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" })
+				.format(new Date(`${date}T12:00:00Z`));
+		}
+
+		function renderDailySummary() {
+			dailyList.innerHTML = dailyTargets.map(target => {
+				const values = models.map(model => forecastCache.get(model.id)?.valuesByTarget?.[target]?.value4808)
+					.filter(value => Number.isFinite(value));
+				const mean = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+				const selected = timeInput.value === target;
+				return `<button class="day-chip" type="button" data-target="${target}" aria-pressed="${selected}">
+					<span class="day-name">${dayLabel(target)}</span>
+					<span class="day-value">${mean == null ? "…" : `${mean}<small>km/h</small>`}</span>
+					<span class="day-count">${mean == null ? "Calcul…" : `${values.length}/${models.length} modèles`}</span>
+				</button>`;
+			}).join("");
+		}
+
+		function updateSelectedDay() {
+			dailyList.querySelectorAll(".day-chip").forEach(button => {
+				button.setAttribute("aria-pressed", String(button.dataset.target === timeInput.value));
+			});
 		}
 
 		function displayDate(date, zone, options = {}) {
@@ -157,29 +213,15 @@
 			return `<span class="speed">${Math.round(Number(value))}<span class="unit">km/h</span></span>`;
 		}
 
-		async function fetchRun(model, run, target) {
-			const params = new URLSearchParams({
-				latitude: "45.8326", longitude: "6.8652", elevation: "4808",
-				hourly: "wind_speed_600hPa,wind_speed_500hPa,wind_direction_600hPa,wind_direction_500hPa,geopotential_height_600hPa,geopotential_height_500hPa",
-				timezone: paris, wind_speed_unit: "kmh", models: model.id,
-				run: run.toISOString().slice(0, 16)
-			});
-			const response = await fetch(`${api}?${params}`);
-			const data = await response.json();
-			if (!response.ok || data.error) throw new Error(data.reason || `HTTP ${response.status}`);
-			const times = data.hourly?.time || [];
-			const index = times.indexOf(target);
-			if (index < 0) return { outsideHorizon: true };
-			const hourly = data.hourly;
+		function windAt(hourly, index) {
 			const value600 = hourly.wind_speed_600hPa?.[index];
 			const value500 = hourly.wind_speed_500hPa?.[index];
-			if (value600 == null && value500 == null) throw new Error("Niveaux 600/500 hPa indisponibles pour ce modèle");
 			const height600 = hourly.geopotential_height_600hPa?.[index];
 			const height500 = hourly.geopotential_height_500hPa?.[index];
 			const direction600 = hourly.wind_direction_600hPa?.[index];
 			const direction500 = hourly.wind_direction_500hPa?.[index];
 			let value4808 = null;
-			if ([height600, height500, value600, value500, direction600, direction500].every(Number.isFinite)) {
+			if ([height600, height500, value600, value500, direction600, direction500].every(Number.isFinite) && height500 !== height600) {
 				const fraction = (4808 - height600) / (height500 - height600);
 				if (fraction >= 0 && fraction <= 1) {
 					const component = (speed, direction, axis) => {
@@ -191,20 +233,36 @@
 					value4808 = Math.hypot(east, north);
 				}
 			}
-			return { value600, value500, value4808, run };
+			return { value600, value500, value4808 };
 		}
 
-		async function loadModel(model, target) {
+		async function fetchRun(model, run, targets) {
+			const params = new URLSearchParams({
+				latitude: "45.8326", longitude: "6.8652", elevation: "4808",
+				hourly: "wind_speed_600hPa,wind_speed_500hPa,wind_direction_600hPa,wind_direction_500hPa,geopotential_height_600hPa,geopotential_height_500hPa",
+				timezone: paris, wind_speed_unit: "kmh", models: model.id,
+				run: run.toISOString().slice(0, 16)
+			});
+			const response = await fetch(`${api}?${params}`);
+			const data = await response.json();
+			if (!response.ok || data.error) throw new Error(data.reason || `HTTP ${response.status}`);
+			const times = data.hourly?.time || [];
+			const valuesByTarget = {};
+			for (const target of targets) {
+				const index = times.indexOf(target);
+				if (index >= 0) valuesByTarget[target] = windAt(data.hourly, index);
+			}
+			if (!Object.keys(valuesByTarget).length) return { outsideHorizon: true };
+			return { valuesByTarget, run };
+		}
+
+		async function loadModel(model, targets) {
 			let lastError;
 			for (const run of runCandidates(model)) {
 				try {
-					const result = await fetchRun(model, run, target);
-					if (result.outsideHorizon) return { error: "Date hors de l’échéance du modèle" };
-					if (result.value600 == null && result.value500 == null) return { error: "Niveaux 600/500 hPa indisponibles" };
-					return {
-						values600: speed(result.value600), values500: speed(result.value500), values4808: speed(result.value4808),
-						run: `${displayDate(result.run, "UTC")}<small>${displayDate(result.run, paris)} heure de Paris</small>`
-					};
+					const result = await fetchRun(model, run, targets);
+					if (!result.outsideHorizon) return result;
+					return { error: "Date hors de l’échéance du modèle" };
 				} catch (error) {
 					lastError = error;
 				}
@@ -222,7 +280,15 @@
 			status.textContent = "Récupération des derniers runs disponibles…";
 			results.innerHTML = models.map(model => rowHTML(model)).join("");
 			const tasks = models.map(async (model, index) => {
-				const result = await loadModel(model, target);
+				let forecast = forecastCache.get(model.id);
+				if (!forecast?.valuesByTarget?.[target] && !forecast?.error) {
+					forecast = await loadModel(model, [target]);
+				}
+				const values = forecast?.valuesByTarget?.[target];
+				const result = forecast?.error ? forecast : values ? {
+					values600: speed(values.value600), values500: speed(values.value500), values4808: speed(values.value4808),
+					run: `${displayDate(forecast.run, "UTC")}<small>${displayDate(forecast.run, paris)} heure de Paris</small>`
+				} : { error: "Vent indisponible pour cette heure" };
 				const row = results.rows[index];
 				if (result.error) {
 					row.innerHTML = rowHTML(model, { error: `<span class="empty">${result.error}</span>`, run: `<span class="empty">—</span>` }).replace(/^<tr>|<\/tr>$/g, "");
@@ -231,6 +297,7 @@
 				}
 			});
 			await Promise.all(tasks);
+			updateSelectedDay();
 			const updated = new Intl.DateTimeFormat("fr-FR", { timeZone: paris, hour: "2-digit", minute: "2-digit" }).format(new Date());
 			const [date, hour] = target.split("T");
 			const [year, month, day] = date.split("-");
@@ -238,10 +305,29 @@
 			refreshButton.disabled = false;
 		}
 
-		timeInput.value = parisInputValue(new Date(Math.ceil((Date.now() + 1) / 3600000) * 3600000));
+		async function initialize() {
+			dailyTargets = upcomingNoons();
+			timeInput.value = dailyTargets[0];
+			renderDailySummary();
+			const targets = [...new Set([timeInput.value, ...dailyTargets])];
+			for (const model of models) {
+				const forecast = await loadModel(model, targets);
+				forecastCache.set(model.id, forecast);
+				renderDailySummary();
+			}
+			await refresh();
+		}
+
+		dailyList.addEventListener("click", event => {
+			const button = event.target.closest(".day-chip");
+			if (!button) return;
+			timeInput.value = button.dataset.target;
+			updateSelectedDay();
+			refresh();
+		});
 		refreshButton.addEventListener("click", refresh);
 		timeInput.addEventListener("change", refresh);
-		refresh();
+		initialize();
 	</script>
 </body>
 </html>
