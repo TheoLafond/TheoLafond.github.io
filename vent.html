@@ -131,6 +131,7 @@
 		const refreshButton = document.querySelector("#refresh");
 		const dailyList = document.querySelector("#daily-list");
 		const forecastCache = new Map();
+		const resolvedModelsByTarget = new Map();
 		let dailyTargets = [];
 
 		function parisInputValue(date) {
@@ -169,11 +170,13 @@
 				const values = models.map(model => forecastCache.get(model.id)?.valuesByTarget?.[target]?.value4808)
 					.filter(value => Number.isFinite(value));
 				const mean = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+				const resolvedCount = resolvedModelsByTarget.get(target)?.size || 0;
+				const ready = resolvedCount === models.length;
 				const selected = timeInput.value === target;
 				return `<button class="day-chip" type="button" data-target="${target}" aria-pressed="${selected}">
 					<span class="day-name">${dayLabel(target)}</span>
-					<span class="day-value">${mean == null ? "…" : `${mean}<small>km/h</small>`}</span>
-					<span class="day-count">${mean == null ? "Calcul…" : `${values.length}/${models.length} modèles`}</span>
+					<span class="day-value">${!ready || mean == null ? "…" : `${mean}<small>km/h</small>`}</span>
+					<span class="day-count">${ready ? `${values.length}/${models.length} modèles` : `${resolvedCount}/${models.length} réponses`}</span>
 				</button>`;
 			}).join("");
 		}
@@ -211,6 +214,10 @@
 		function speed(value) {
 			if (value == null || !Number.isFinite(Number(value))) return `<span class="empty">indisponible</span>`;
 			return `<span class="speed">${Math.round(Number(value))}<span class="unit">km/h</span></span>`;
+		}
+
+		function hasPressureWind(values) {
+			return Number.isFinite(values?.value600) || Number.isFinite(values?.value500);
 		}
 
 		function windAt(hourly, index) {
@@ -256,18 +263,47 @@
 			return { valuesByTarget, run };
 		}
 
-		async function loadModel(model, targets) {
+		async function loadModel(model, targets, retryEmptyRuns = false) {
 			let lastError;
+			const valuesByTarget = {};
+			const runsByTarget = {};
 			for (const run of runCandidates(model)) {
 				try {
 					const result = await fetchRun(model, run, targets);
-					if (!result.outsideHorizon) return result;
-					return { error: "Date hors de l’échéance du modèle" };
+					if (result.outsideHorizon) {
+						lastError = new Error("Date hors de l’échéance du modèle");
+						if (!retryEmptyRuns) return { error: lastError.message };
+						continue;
+					}
+					for (const target of targets) {
+						const values = result.valuesByTarget[target];
+						if (!hasPressureWind(values) || hasPressureWind(valuesByTarget[target])) continue;
+						valuesByTarget[target] = values;
+						runsByTarget[target] = run;
+					}
+					if (targets.every(target => hasPressureWind(valuesByTarget[target]))) break;
+					if (!retryEmptyRuns && Object.keys(valuesByTarget).length) {
+						return { ...result, valuesByTarget, runsByTarget };
+					}
+					lastError = new Error("Aucune donnée de vent dans ce run");
+					if (!retryEmptyRuns) return { error: lastError.message };
 				} catch (error) {
 					lastError = error;
 				}
 			}
+			if (Object.keys(valuesByTarget).length) {
+				return { valuesByTarget, runsByTarget, run: Object.values(runsByTarget)[0] };
+			}
 			return { error: lastError?.message || "Run récent indisponible" };
+		}
+
+		function mergeForecasts(current, additional) {
+			return {
+				...(current?.error ? {} : current),
+				...additional,
+				valuesByTarget: { ...(current?.valuesByTarget || {}), ...(additional?.valuesByTarget || {}) },
+				runsByTarget: { ...(current?.runsByTarget || {}), ...(additional?.runsByTarget || {}) }
+			};
 		}
 
 		async function refresh() {
@@ -281,14 +317,19 @@
 			results.innerHTML = models.map(model => rowHTML(model)).join("");
 			const tasks = models.map(async (model, index) => {
 				let forecast = forecastCache.get(model.id);
-				if (!forecast?.valuesByTarget?.[target] && !forecast?.error) {
-					forecast = await loadModel(model, [target]);
+				if (!hasPressureWind(forecast?.valuesByTarget?.[target])) {
+					forecast = await loadModel(model, [target], true);
+					if (forecast.valuesByTarget) {
+						forecast = mergeForecasts(forecastCache.get(model.id), forecast);
+						forecastCache.set(model.id, forecast);
+						renderDailySummary();
+					}
 				}
 				const values = forecast?.valuesByTarget?.[target];
-				const result = forecast?.error ? forecast : values ? {
+				const result = forecast?.error ? forecast : hasPressureWind(values) ? {
 					values600: speed(values.value600), values500: speed(values.value500), values4808: speed(values.value4808),
-					run: `${displayDate(forecast.run, "UTC")}<small>${displayDate(forecast.run, paris)} heure de Paris</small>`
-				} : { error: "Vent indisponible pour cette heure" };
+					run: `${displayDate(forecast.runsByTarget?.[target] || forecast.run, "UTC")}<small>${displayDate(forecast.runsByTarget?.[target] || forecast.run, paris)} heure de Paris</small>`
+				} : { error: "Aucune donnée de vent pour cette échéance" };
 				const row = results.rows[index];
 				if (result.error) {
 					row.innerHTML = rowHTML(model, { error: `<span class="empty">${result.error}</span>`, run: `<span class="empty">—</span>` }).replace(/^<tr>|<\/tr>$/g, "");
@@ -308,13 +349,42 @@
 		async function initialize() {
 			dailyTargets = upcomingNoons();
 			timeInput.value = dailyTargets[0];
+			dailyTargets.forEach(target => resolvedModelsByTarget.set(target, new Set()));
 			renderDailySummary();
 			const targets = [...new Set([timeInput.value, ...dailyTargets])];
-			for (const model of models) {
-				const forecast = await loadModel(model, targets);
-				forecastCache.set(model.id, forecast);
-				renderDailySummary();
-			}
+			const fallbackTargets = new Map();
+			const queue = [...models];
+			const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+				while (queue.length) {
+					const model = queue.shift();
+					const forecast = await loadModel(model, targets);
+					forecastCache.set(model.id, forecast);
+					const missingTargets = dailyTargets.filter(target => {
+						if (hasPressureWind(forecast?.valuesByTarget?.[target])) {
+							resolvedModelsByTarget.get(target).add(model.id);
+							return false;
+						}
+						return true;
+					});
+					fallbackTargets.set(model.id, missingTargets);
+					renderDailySummary();
+				}
+			});
+			await Promise.all(workers);
+			const fallbackQueue = models.filter(model => fallbackTargets.get(model.id)?.length);
+			const fallbackWorkers = Array.from({ length: Math.min(3, fallbackQueue.length) }, async () => {
+				while (fallbackQueue.length) {
+					const model = fallbackQueue.shift();
+					const missingTargets = fallbackTargets.get(model.id);
+					const fallback = await loadModel(model, missingTargets, true);
+					if (fallback.valuesByTarget) {
+						forecastCache.set(model.id, mergeForecasts(forecastCache.get(model.id), fallback));
+					}
+					missingTargets.forEach(target => resolvedModelsByTarget.get(target).add(model.id));
+					renderDailySummary();
+				}
+			});
+			await Promise.all(fallbackWorkers);
 			await refresh();
 		}
 
